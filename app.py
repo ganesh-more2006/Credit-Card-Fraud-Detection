@@ -21,8 +21,10 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. Database Connection
-conn = sqlite3.connect("fraud_data.db")
+# 2. Database Connection Helper
+# Function to create a connection (Helps avoiding threading errors)
+def get_connection():
+    return sqlite3.connect("fraud_data.db", check_same_thread=False)
 
 # --- SIDEBAR: Filter & Branding ---
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=100)
@@ -44,9 +46,13 @@ st.sidebar.info("👤 **Developer:** Ganesh More\n\n🎯 **Goal:** Detect Loan F
 # --- DATA PROCESSING ---
 @st.cache_data
 def load_filtered_data(types, income):
+    # Establish connection inside the cached function
+    local_conn = get_connection()
     type_str = "('" + "','".join(types) + "')"
     query = f"SELECT * FROM loan_data WHERE NAME_CONTRACT_TYPE IN {type_str} AND AMT_INCOME_TOTAL >= {income}"
-    return pd.read_sql(query, conn)
+    df = pd.read_sql(query, local_conn)
+    local_conn.close() # Close connection after use
+    return df
 
 df_filtered = load_filtered_data(contract_type, income_filter)
 
@@ -59,9 +65,13 @@ st.markdown("---")
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 
 total_apps = len(df_filtered)
-total_def = int(df_filtered['TARGET'].sum())
-risk_rate = (total_def / total_apps * 100) if total_apps > 0 else 0
-avg_credit = df_filtered['AMT_CREDIT'].mean()
+# Safety check to prevent errors if dataframe is empty
+if total_apps > 0:
+    total_def = int(df_filtered['TARGET'].sum())
+    risk_rate = (total_def / total_apps * 100)
+    avg_credit = df_filtered['AMT_CREDIT'].mean()
+else:
+    total_def, risk_rate, avg_credit = 0, 0, 0
 
 with kpi1:
     st.metric("Total Apps", f"{total_apps:,}")
@@ -102,14 +112,15 @@ with col_right:
 st.markdown("---")
 st.subheader("💰 Income vs. Credit Amount Relationship")
 # Sampling data for performance
-df_sample = df_filtered.sample(min(2000, len(df_filtered)))
-fig_scatter = px.scatter(df_sample, x="AMT_INCOME_TOTAL", y="AMT_CREDIT", 
-                         color="TARGET", size="AMT_ANNUITY", 
-                         hover_data=['SK_ID_CURR'], 
-                         title="Correlation: Income vs Loan Size (Color = Fraud Risk)",
-                         color_continuous_scale=['#1f77b4', '#d62728'],
-                         template="plotly_dark")
-st.plotly_chart(fig_scatter, use_container_width=True)
+if len(df_filtered) > 0:
+    df_sample = df_filtered.sample(min(2000, len(df_filtered)))
+    fig_scatter = px.scatter(df_sample, x="AMT_INCOME_TOTAL", y="AMT_CREDIT", 
+                             color="TARGET", size="AMT_ANNUITY", 
+                             hover_data=['SK_ID_CURR'], 
+                             title="Correlation: Income vs Loan Size (Color = Fraud Risk)",
+                             color_continuous_scale=['#1f77b4', '#d62728'],
+                             template="plotly_dark")
+    st.plotly_chart(fig_scatter, use_container_width=True)
 
 # --- ROW 4: EXECUTIVE SUMMARY TABLE ---
 st.markdown("---")
@@ -126,7 +137,10 @@ WHERE TARGET = 1
 ORDER BY EXT_SOURCE_2 ASC, AMT_CREDIT DESC 
 LIMIT 10
 """
-df_priority = pd.read_sql(query_priority, conn)
+# Get fresh connection for the summary table
+conn_table = get_connection()
+df_priority = pd.read_sql(query_priority, conn_table)
+conn_table.close()
 
 # Fancy Styled Table
 st.table(df_priority.style.format({"Income": "${:,.0f}", "Loan": "${:,.0f}", "Score": "{:.2f}"})
