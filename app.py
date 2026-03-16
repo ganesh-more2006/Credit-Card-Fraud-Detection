@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -21,10 +20,14 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. Database Connection Helper
-# Function to create a connection (Helps avoiding threading errors)
-def get_connection():
-    return sqlite3.connect("fraud_data.db", check_same_thread=False)
+# 2. Data Loading (Using CSV instead of SQL to fix the DatabaseError)
+@st.cache_data
+def load_full_data():
+    # Make sure 'loan_data_small.csv' is in your GitHub folder
+    df = pd.read_csv("loan_data_small.csv")
+    return df
+
+df_all = load_full_data()
 
 # --- SIDEBAR: Filter & Branding ---
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=100)
@@ -34,44 +37,31 @@ st.sidebar.markdown("---")
 # Filters
 contract_type = st.sidebar.multiselect(
     "Select Loan Type", 
-    options=["Cash loans", "Revolving loans"], 
-    default=["Cash loans", "Revolving loans"]
+    options=df_all['NAME_CONTRACT_TYPE'].unique(), 
+    default=df_all['NAME_CONTRACT_TYPE'].unique()
 )
 
-income_filter = st.sidebar.slider("Minimum Income Threshold", 0, 500000, 50000)
+income_filter = st.sidebar.slider("Minimum Income Threshold", 0, int(df_all['AMT_INCOME_TOTAL'].max()), 50000)
 
 st.sidebar.markdown("---")
-st.sidebar.info("👤 **Developer:** Ganesh More\n\n🎯 **Goal:** Detect Loan Fraud using SQL & Python")
+st.sidebar.info("👤 **Developer:** Ganesh More\n\n🎯 **Goal:** Detect Loan Fraud using Python")
 
-# --- DATA PROCESSING ---
-@st.cache_data
-def load_filtered_data(types, income):
-    # Establish connection inside the cached function
-    local_conn = get_connection()
-    type_str = "('" + "','".join(types) + "')"
-    query = f"SELECT * FROM loan_data WHERE NAME_CONTRACT_TYPE IN {type_str} AND AMT_INCOME_TOTAL >= {income}"
-    df = pd.read_sql(query, local_conn)
-    local_conn.close() # Close connection after use
-    return df
-
-df_filtered = load_filtered_data(contract_type, income_filter)
+# --- DATA PROCESSING (Pandas logic replacing SQL) ---
+df_filtered = df_all[(df_all['NAME_CONTRACT_TYPE'].isin(contract_type)) & 
+                     (df_all['AMT_INCOME_TOTAL'] >= income_filter)]
 
 # --- HEADER ---
 st.title("🛡️ Credit Card Fraud & Risk Intelligence Dashboard")
 st.write(f"Showing analysis for **{len(df_filtered):,}** filtered applications.")
 st.markdown("---")
 
-# --- ROW 1: KPI METRICS (Modern Style) ---
+# --- ROW 1: KPI METRICS ---
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 
 total_apps = len(df_filtered)
-# Safety check to prevent errors if dataframe is empty
-if total_apps > 0:
-    total_def = int(df_filtered['TARGET'].sum())
-    risk_rate = (total_def / total_apps * 100)
-    avg_credit = df_filtered['AMT_CREDIT'].mean()
-else:
-    total_def, risk_rate, avg_credit = 0, 0, 0
+total_def = int(df_filtered['TARGET'].sum())
+risk_rate = (total_def / total_apps * 100) if total_apps > 0 else 0
+avg_credit = df_filtered['AMT_CREDIT'].mean()
 
 with kpi1:
     st.metric("Total Apps", f"{total_apps:,}")
@@ -84,12 +74,11 @@ with kpi4:
 
 st.markdown("---")
 
-# --- ROW 2: ADVANCED VISUALIZATIONS ---
+# --- ROW 2: VISUALIZATIONS ---
 col_left, col_right = st.columns([6, 4])
 
 with col_left:
     st.subheader("🔥 Default Risk Trend by Age Group")
-    # Grouping for chart
     df_age = df_filtered.groupby('AGE_GROUP', observed=True)['TARGET'].mean().reset_index()
     df_age['TARGET'] = df_age['TARGET'] * 100
     
@@ -108,43 +97,32 @@ with col_right:
                           title="Education vs Gender Risk")
     st.plotly_chart(fig_sun, use_container_width=True)
 
-# --- ROW 3: INCOME vs CREDIT (SCATTER ANALYSIS) ---
+# --- ROW 3: SCATTER ANALYSIS ---
 st.markdown("---")
 st.subheader("💰 Income vs. Credit Amount Relationship")
-# Sampling data for performance
-if len(df_filtered) > 0:
-    df_sample = df_filtered.sample(min(2000, len(df_filtered)))
-    fig_scatter = px.scatter(df_sample, x="AMT_INCOME_TOTAL", y="AMT_CREDIT", 
-                             color="TARGET", size="AMT_ANNUITY", 
-                             hover_data=['SK_ID_CURR'], 
-                             title="Correlation: Income vs Loan Size (Color = Fraud Risk)",
-                             color_continuous_scale=['#1f77b4', '#d62728'],
-                             template="plotly_dark")
-    st.plotly_chart(fig_scatter, use_container_width=True)
+df_sample = df_filtered.sample(min(2000, len(df_filtered)))
+fig_scatter = px.scatter(df_sample, x="AMT_INCOME_TOTAL", y="AMT_CREDIT", 
+                         color="TARGET", size="AMT_ANNUITY", 
+                         hover_data=['SK_ID_CURR'], 
+                         color_continuous_scale=['#1f77b4', '#d62728'],
+                         template="plotly_dark")
+st.plotly_chart(fig_scatter, use_container_width=True)
 
-# --- ROW 4: EXECUTIVE SUMMARY TABLE ---
+# --- ROW 4: EXECUTIVE SUMMARY TABLE (Pandas sorting replacing SQL) ---
 st.markdown("---")
 st.subheader("📋 Priority Investigation List (High Risk Clients)")
 st.warning("The following clients have low external credit scores but high credit demands.")
 
-# SQL for priority list
-query_priority = """
-SELECT SK_ID_CURR AS ID, CODE_GENDER AS Sex, NAME_INCOME_TYPE AS Job, 
-       AMT_INCOME_TOTAL AS Income, AMT_CREDIT AS Loan, 
-       EXT_SOURCE_2 AS Score
-FROM loan_data 
-WHERE TARGET = 1 
-ORDER BY EXT_SOURCE_2 ASC, AMT_CREDIT DESC 
-LIMIT 10
-"""
-# Get fresh connection for the summary table
-conn_table = get_connection()
-df_priority = pd.read_sql(query_priority, conn_table)
-conn_table.close()
+# Logic: Defaulters sorted by lowest score and highest loan
+df_priority = df_filtered[df_filtered['TARGET'] == 1].sort_values(
+    by=['EXT_SOURCE_2', 'AMT_CREDIT'], ascending=[True, False]).head(10)
 
-# Fancy Styled Table
-st.table(df_priority.style.format({"Income": "${:,.0f}", "Loan": "${:,.0f}", "Score": "{:.2f}"})
+priority_display = df_priority[['SK_ID_CURR', 'CODE_GENDER', 'NAME_INCOME_TYPE', 
+                                'AMT_INCOME_TOTAL', 'AMT_CREDIT', 'EXT_SOURCE_2']]
+priority_display.columns = ['ID', 'Sex', 'Job', 'Income', 'Loan', 'Score']
+
+st.table(priority_display.style.format({"Income": "${:,.0f}", "Loan": "${:,.0f}", "Score": "{:.2f}"})
          .background_gradient(subset=['Score'], cmap='Reds_r'))
 
 st.markdown("---")
-st.markdown("<center>Developed with ❤️ by Ganesh More | GH Raisoni College of Engineering and Management</center>", unsafe_allow_html=True)
+st.markdown("<center>Developed with ❤️ by Ganesh More | GH Raisoni College</center>", unsafe_allow_html=True)
